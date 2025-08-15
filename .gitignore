@@ -1,0 +1,15 @@
+# Configuration files (contain secrets)
+config.yaml
+
+# Generated keys
+wish_host_key
+wish_host_key.pub
+authorized_keys
+
+# Build artifacts
+wonderland
+
+# Go build cache
+go.sum
+
+.idea
