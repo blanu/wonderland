@@ -1,5 +1,6 @@
 # Configuration files (contain secrets)
 config.yaml
+invite.yaml
 
 # Generated keys
 wish_host_key

@@ -18,6 +18,7 @@ type Config struct {
 
 	Tunnel struct {
 		Host       string `yaml:"host"`
+		PublicHost string `yaml:"public_host"`
 		Port       int    `yaml:"port"`
 		User       string `yaml:"user"`
 		KeyFile    string `yaml:"key_file"`
@@ -31,6 +32,10 @@ type Config struct {
 		AuthorizedKeys string `yaml:"authorized_keys"`
 		AdminKeys      string `yaml:"admin_keys"`
 	} `yaml:"wish"`
+
+	Server struct {
+		Name string `yaml:"name"`
+	} `yaml:"server"`
 }
 
 // getConfigDir returns the configuration directory
