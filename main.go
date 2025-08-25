@@ -193,11 +193,20 @@ type InviteConfig struct {
 	Generated     time.Time `yaml:"generated"`
 }
 
-func createInviteKeypair() error {
-	// Load config to get connection details
+// loadConfigIfNeeded loads config only when required for server operations
+func loadConfigIfNeeded() (*Config, error) {
 	config, err := LoadConfig("")
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return nil, fmt.Errorf("failed to load config: %w", err)
+	}
+	return config, nil
+}
+
+func createInviteKeypair() error {
+	// Load config to get connection details
+	config, err := loadConfigIfNeeded()
+	if err != nil {
+		return err
 	}
 
 	log.Printf("Debug: Server name from config: '%s'", config.Server.Name)
@@ -305,21 +314,52 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 
 	log.Printf("Expected server key: %s", ssh.FingerprintSHA256(serverHostKey))
 
-	// Load our real config to get our actual SSH key
-	config, err := LoadConfig("")
+	// Find SSH key file - try common locations without loading config
+	var realKeyData []byte
+	var username string
+
+	// Try common SSH key locations first (avoid loading config)
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	// Load our real private key
-	realKeyData, err := os.ReadFile(expandPath(config.Tunnel.KeyFile, ""))
-	if err != nil {
-		return fmt.Errorf("failed to read real SSH key: %w", err)
+	keyPaths := []string{
+		filepath.Join(homeDir, ".ssh", "id_ed25519"),
+		filepath.Join(homeDir, ".ssh", "id_rsa"),
+		filepath.Join(homeDir, ".ssh", "id_ecdsa"),
 	}
+
+	var keyFound bool
+	var usedKeyPath string
+	for _, keyPath := range keyPaths {
+		realKeyData, err = os.ReadFile(keyPath)
+		if err == nil {
+			usedKeyPath = keyPath
+			keyFound = true
+			break
+		}
+	}
+
+	if !keyFound {
+		return fmt.Errorf("no SSH key found in common locations (~/.ssh/id_ed25519, ~/.ssh/id_rsa, ~/.ssh/id_ecdsa)")
+	}
+
+	log.Printf("Using SSH key: %s", usedKeyPath)
+
+	// Use current user as default username
+	username = os.Getenv("USER")
+	if username == "" {
+		username = os.Getenv("USERNAME") // Windows
+	}
+	if username == "" {
+		username = "user" // fallback
+	}
+	log.Printf("Using username: %s", username)
 
 	realSigner, err := ssh.ParsePrivateKey(realKeyData)
 	if err != nil {
-		return fmt.Errorf("failed to parse real SSH key: %w", err)
+		return fmt.Errorf("failed to parse SSH key: %w", err)
 	}
 
 	// Get our real public key for registration
@@ -367,7 +407,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 	log.Printf("Connecting to %s:%d for registration", invite.Host, invite.Port)
 
 	inviteConfig := &ssh.ClientConfig{
-		User: config.Tunnel.User,
+		User: username,
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(inviteSigner),
 		},
@@ -461,7 +501,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 	log.Printf("Reconnecting with real key to verify registration")
 
 	realConfig := &ssh.ClientConfig{
-		User: config.Tunnel.User,
+		User: username,
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(realSigner),
 		},
@@ -577,7 +617,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 func runServer() {
 	log.Printf("Starting Wonderland Server...")
 
-	config, err := LoadConfig("")
+	config, err := loadConfigIfNeeded()
 	if err != nil {
 		log.Fatalf("Configuration error: %v", err)
 	}
@@ -606,7 +646,7 @@ func runServer() {
 func runClient(hostname, bastionOverride string) {
 	log.Printf("Starting Wonderland Client...")
 
-	config, err := LoadConfig("")
+	config, err := loadConfigIfNeeded()
 	if err != nil {
 		log.Fatalf("Configuration error: %v", err)
 	}
