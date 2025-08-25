@@ -19,6 +19,21 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// formatAddress properly formats addresses for dialing, handling IPv6 bracketing
+func formatAddress(address string, port int) string {
+	// Check if it's an IPv6 address (contains colons but not already bracketed)
+	if strings.Contains(address, ":") && !strings.HasPrefix(address, "[") {
+		// IPv6 address without brackets - add them
+		return fmt.Sprintf("[%s]:%d", address, port)
+	} else if strings.HasPrefix(address, "[") {
+		// Already bracketed IPv6 address
+		return fmt.Sprintf("%s:%d", address, port)
+	} else {
+		// IPv4 address or hostname
+		return fmt.Sprintf("%s:%d", address, port)
+	}
+}
+
 func main() {
 	log.SetOutput(os.Stdout)
 
@@ -79,7 +94,7 @@ func main() {
 			if err := AddHost(name, address, port, key, notes, bastionHost, bastionPort, bastionUser); err != nil {
 				log.Fatalf("Failed to add host: %v", err)
 			}
-			log.Printf("✅ Host '%s' added successfully", name)
+			log.Printf("Host '%s' added successfully", name)
 		},
 	}
 
@@ -112,7 +127,7 @@ func main() {
 			if err := RemoveHost(name); err != nil {
 				log.Fatalf("Failed to remove host: %v", err)
 			}
-			log.Printf("✅ Host '%s' removed successfully", name)
+			log.Printf("Host '%s' removed successfully", name)
 		},
 	}
 
@@ -130,7 +145,7 @@ func main() {
 			if err := createInviteKeypair(); err != nil {
 				log.Fatalf("Failed to create invite keypair: %v", err)
 			}
-			log.Printf("✅ New invite keypair created successfully")
+			log.Printf("New invite keypair created successfully")
 		},
 	}
 
@@ -151,7 +166,7 @@ func main() {
 			if err := openInvite(inviteFile, bastionOverride, nameOverride); err != nil {
 				log.Fatalf("Failed to open invite: %v", err)
 			}
-			log.Printf("✅ Invite opened and registration completed")
+			log.Printf("Invite opened and registration completed")
 		},
 	}
 	inviteOpenCmd.Flags().StringP("bastion", "b", "", "Override bastion host (user@host:port)")
@@ -262,8 +277,8 @@ func createInviteKeypair() error {
 		return fmt.Errorf("failed to write public key: %w", err)
 	}
 
-	log.Printf("📄 Invite file saved to: %s", inviteFilePath)
-	log.Printf("🔑 Public key appended to: %s", inviteKeysPath)
+	log.Printf("Invite file saved to: %s", inviteFilePath)
+	log.Printf("Public key appended to: %s", inviteKeysPath)
 
 	return nil
 }
@@ -280,7 +295,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 		return fmt.Errorf("failed to parse invite file: %w", err)
 	}
 
-	log.Printf("📧 Processing invite for server '%s' at %s:%d", invite.ServerName, invite.Host, invite.Port)
+	log.Printf("Processing invite for server '%s' at %s:%d", invite.ServerName, invite.Host, invite.Port)
 
 	// Parse and validate the server host key from invite
 	serverHostKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(invite.ServerHostKey))
@@ -288,7 +303,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 		return fmt.Errorf("invalid server host key in invite: %w", err)
 	}
 
-	log.Printf("🔐 Expected server key: %s", ssh.FingerprintSHA256(serverHostKey))
+	log.Printf("Expected server key: %s", ssh.FingerprintSHA256(serverHostKey))
 
 	// Load our real config to get our actual SSH key
 	config, err := LoadConfig("")
@@ -310,7 +325,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 	// Get our real public key for registration
 	realPublicKey := ssh.MarshalAuthorizedKey(realSigner.PublicKey())
 
-	log.Printf("🔑 Using real key fingerprint: %s", ssh.FingerprintSHA256(realSigner.PublicKey()))
+	log.Printf("Using real key fingerprint: %s", ssh.FingerprintSHA256(realSigner.PublicKey()))
 
 	// Parse the invite private key
 	inviteSigner, err := ssh.ParsePrivateKey([]byte(invite.PrivateKey))
@@ -318,7 +333,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 		return fmt.Errorf("failed to parse invite private key: %w", err)
 	}
 
-	log.Printf("🎫 Using invite key fingerprint: %s", ssh.FingerprintSHA256(inviteSigner.PublicKey()))
+	log.Printf("Using invite key fingerprint: %s", ssh.FingerprintSHA256(inviteSigner.PublicKey()))
 
 	// Determine bastion settings
 	var bastionHost, bastionUser string
@@ -344,12 +359,12 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 			return fmt.Errorf("server host key mismatch: got %s, expected %s",
 				ssh.FingerprintSHA256(key), ssh.FingerprintSHA256(serverHostKey))
 		}
-		log.Printf("✅ Server host key verified: %s", ssh.FingerprintSHA256(key))
+		log.Printf("Server host key verified: %s", ssh.FingerprintSHA256(key))
 		return nil
 	}
 
 	// Connect using the invite key for registration
-	log.Printf("🔗 Connecting to %s:%d for registration", invite.Host, invite.Port)
+	log.Printf("Connecting to %s:%d for registration", invite.Host, invite.Port)
 
 	inviteConfig := &ssh.ClientConfig{
 		User: config.Tunnel.User,
@@ -360,7 +375,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 		Timeout:         15 * time.Second,
 	}
 
-	addr := fmt.Sprintf("%s:%d", invite.Host, invite.Port)
+	addr := formatAddress(invite.Host, invite.Port)
 
 	var conn *ssh.Client
 
@@ -378,17 +393,17 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 			Timeout:         10 * time.Second,
 		}
 
-		bastionAddr := fmt.Sprintf("%s:%d", bastionHost, bastionPort)
+		bastionAddr := formatAddress(bastionHost, bastionPort)
 		bastionConn, err := ssh.Dial("tcp", bastionAddr, bastionConfig)
 		if err != nil {
 			return fmt.Errorf("failed to connect to bastion %s: %w", bastionAddr, err)
 		}
 		defer bastionConn.Close()
 
-		log.Printf("✅ Connected to bastion")
+		log.Printf("Connected to bastion")
 
 		// Connect to target through bastion
-		targetAddr := fmt.Sprintf("[%s]:%d", invite.Host, invite.Port)
+		targetAddr := formatAddress(invite.Host, invite.Port)
 		targetConn, err := bastionConn.Dial("tcp", targetAddr)
 		if err != nil {
 			return fmt.Errorf("failed to connect to target %s via bastion: %w", targetAddr, err)
@@ -426,7 +441,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 	}
 
 	// Send our real public key for registration
-	log.Printf("📝 Registering real public key with server")
+	log.Printf("Registering real public key with server")
 	_, err = sessionStdin.Write(realPublicKey)
 	if err != nil {
 		sessionStdin.Close()
@@ -443,7 +458,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 	conn.Close()
 
 	// Reconnect with real key to verify registration worked
-	log.Printf("🔄 Reconnecting with real key to verify registration")
+	log.Printf("Reconnecting with real key to verify registration")
 
 	realConfig := &ssh.ClientConfig{
 		User: config.Tunnel.User,
@@ -465,7 +480,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 			Timeout:         10 * time.Second,
 		}
 
-		bastionAddr := fmt.Sprintf("%s:%d", bastionHost, bastionPort)
+		bastionAddr := formatAddress(bastionHost, bastionPort)
 		bastionConn, err := ssh.Dial("tcp", bastionAddr, bastionConfig)
 		if err != nil {
 			return fmt.Errorf("failed to reconnect to bastion %s: %w", bastionAddr, err)
@@ -473,7 +488,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 		defer bastionConn.Close()
 
 		// Connect to target through bastion
-		targetAddr := fmt.Sprintf("[%s]:%d", invite.Host, invite.Port)
+		targetAddr := formatAddress(invite.Host, invite.Port)
 		targetConn, err := bastionConn.Dial("tcp", targetAddr)
 		if err != nil {
 			return fmt.Errorf("failed to reconnect to target %s via bastion: %w", targetAddr, err)
@@ -497,7 +512,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 		conn.Close()
 	}
 
-	log.Printf("✅ Registration verified - connection successful with real key")
+	log.Printf("Registration verified - connection successful with real key")
 
 	// Determine hostname - use override if provided, otherwise use server name from invite
 	hostname := nameOverride
@@ -531,7 +546,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 		fmt.Sprintf("Added via invite on %s", time.Now().Format("2006-01-02")),
 		bastionHostForDB, bastionPortForDB, bastionUserForDB)
 	if err != nil {
-		log.Printf("⚠️  Warning: Failed to add host to database: %v", err)
+		log.Printf("Warning: Failed to add host to database: %v", err)
 		log.Printf("   You can manually add it later with:")
 		if useBastion {
 			log.Printf("   wonderland add %s -a %s -p %d -k '%s' --bastion-host %s --bastion-port %d --bastion-user %s",
@@ -540,7 +555,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 			log.Printf("   wonderland add %s -a %s -p %d -k '%s'", hostname, invite.Host, invite.Port, invite.ServerHostKey)
 		}
 	} else {
-		log.Printf("📁 Host '%s' added to database", hostname)
+		log.Printf("Host '%s' added to database", hostname)
 		if useBastion {
 			log.Printf("   Bastion: %s@%s:%d", bastionUser, bastionHost, bastionPort)
 		}
@@ -548,19 +563,19 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 
 	// Clean up the invite file
 	if err := os.Remove(inviteFile); err != nil {
-		log.Printf("⚠️  Warning: Failed to remove invite file: %v", err)
+		log.Printf("Warning: Failed to remove invite file: %v", err)
 	} else {
-		log.Printf("🗑️  Invite file cleaned up")
+		log.Printf("Invite file cleaned up")
 	}
 
-	log.Printf("🎉 Registration complete! You can now connect with:")
+	log.Printf("Registration complete! You can now connect with:")
 	log.Printf("   wonderland connect %s", hostname)
 
 	return nil
 }
 
 func runServer() {
-	log.Printf("🚀 Starting Wonderland Server...")
+	log.Printf("Starting Wonderland Server...")
 
 	config, err := LoadConfig("")
 	if err != nil {
@@ -577,19 +592,19 @@ func runServer() {
 		log.Printf("SSH tunnel setup failed: %v (continuing with local access only)", err)
 	}
 
-	log.Printf("🎉 All services started!")
-	log.Printf("🌍 Global access: ssh -p %d %s@%s",
+	log.Printf("All services started!")
+	log.Printf("Global access: ssh -p %d %s@%s",
 		config.Tunnel.RemotePort, config.Tunnel.User, config.Tunnel.Host)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
-	log.Printf("🛑 Shutting down...")
+	log.Printf("Shutting down...")
 }
 
 func runClient(hostname, bastionOverride string) {
-	log.Printf("🔌 Starting Wonderland Client...")
+	log.Printf("Starting Wonderland Client...")
 
 	config, err := LoadConfig("")
 	if err != nil {
