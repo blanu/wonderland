@@ -37,6 +37,53 @@ func formatAddress(address string, port int) string {
 	}
 }
 
+// checkIPv6Connectivity tests if IPv6 connectivity is working
+func checkIPv6Connectivity() bool {
+	// Try connecting to Google's IPv6 DNS server
+	conn, err := net.DialTimeout("tcp6", "[2001:4860:4860::8888]:53", 3*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+// isIPv6Address checks if the given address is IPv6
+func isIPv6Address(address string) bool {
+	// Remove brackets if present
+	cleanAddr := strings.Trim(address, "[]")
+	ip := net.ParseIP(cleanAddr)
+	return ip != nil && ip.To4() == nil && ip.To16() != nil
+}
+
+// handleConnectionError provides helpful error messages and suggestions
+func handleConnectionError(err error, targetHost string, bastionOverride string, commandContext string) error {
+	// Check if this is an IPv6 connectivity issue
+	if isIPv6Address(targetHost) && bastionOverride == "" {
+		log.Printf("Connection failed to IPv6 address: %v", err)
+		log.Printf("Checking IPv6 connectivity...")
+
+		if !checkIPv6Connectivity() {
+			return fmt.Errorf(`connection failed: %v
+
+IPv6 connectivity test failed. Your network may not support IPv6.
+
+Suggestion: Use a bastion host with IPv4 connectivity:
+  %s -b user@bastion-host:22
+
+Where:
+  - user: your username on the bastion host
+  - bastion-host: IPv4 address or hostname of your bastion server
+  - 22: SSH port on bastion host (optional, defaults to 22)
+
+Example: %s -b myuser@203.0.113.1:22`, err, commandContext, commandContext)
+		}
+	}
+
+	// Return original error if not IPv6 related
+	return err
+}
+
 // configModel represents the state of our configuration TUI
 type configModel struct {
 	fields       []configField
@@ -221,7 +268,21 @@ func main() {
 		Run: func(cmd *cobra.Command, args []string) {
 			hostname := args[0]
 			bastionOverride, _ := cmd.Flags().GetString("bastion")
-			runClient(hostname, bastionOverride)
+
+			// Get the host info to check if it's IPv6
+			host, err := GetHost(hostname)
+			if err != nil {
+				log.Fatalf("Failed to get host info: %v", err)
+			}
+
+			if err := runClient(hostname, bastionOverride); err != nil {
+				// Handle connection errors with IPv6 suggestions
+				if enhanced := handleConnectionError(err, host.Address, bastionOverride, "wonderland connect"); enhanced != err {
+					log.Fatalf("%v", enhanced)
+				} else {
+					log.Fatalf("Client failed: %v", err)
+				}
+			}
 		},
 	}
 	connectCmd.Flags().StringP("bastion", "b", "", "Override bastion host (user@host:port)")
@@ -885,7 +946,7 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 		// Direct connection
 		conn, err = ssh.Dial("tcp", addr, inviteConfig)
 		if err != nil {
-			return fmt.Errorf("failed to connect with invite key: %w", err)
+			return handleConnectionError(err, invite.Host, bastionOverride, "wonderland invite open")
 		}
 	}
 
@@ -971,7 +1032,8 @@ func openInvite(inviteFile, bastionOverride, nameOverride string) error {
 		// Direct reconnection
 		conn, err = ssh.Dial("tcp", addr, realConfig)
 		if err != nil {
-			return fmt.Errorf("failed to reconnect with real key - registration may have failed: %w", err)
+			return handleConnectionError(fmt.Errorf("failed to reconnect with real key - registration may have failed: %w", err),
+				invite.Host, bastionOverride, "wonderland invite open")
 		}
 		conn.Close()
 	}
@@ -1067,17 +1129,18 @@ func runServer() {
 	log.Printf("Shutting down...")
 }
 
-func runClient(hostname, bastionOverride string) {
+func runClient(hostname, bastionOverride string) error {
 	log.Printf("Starting Wonderland Client...")
 
 	config, err := loadConfigIfNeeded()
 	if err != nil {
-		log.Fatalf("Configuration error: %v", err)
+		return fmt.Errorf("configuration error: %w", err)
 	}
 
 	if err := StartClient(hostname, config, bastionOverride); err != nil {
-		log.Fatalf("Client failed: %v", err)
+		return fmt.Errorf("client failed: %w", err)
 	}
 
 	log.Printf("Client session ended")
+	return nil
 }
