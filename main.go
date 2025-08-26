@@ -10,10 +10,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 	"gopkg.in/yaml.v3"
@@ -32,6 +35,157 @@ func formatAddress(address string, port int) string {
 		// IPv4 address or hostname
 		return fmt.Sprintf("%s:%d", address, port)
 	}
+}
+
+// configModel represents the state of our configuration TUI
+type configModel struct {
+	fields       []configField
+	currentField int
+	finished     bool
+	err          error
+}
+
+type configField struct {
+	label       string
+	placeholder string
+	value       string
+	help        string
+	required    bool
+	validator   func(string) error
+}
+
+func (m configModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m configModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "esc":
+			return m, tea.Quit
+		case "enter":
+			// Get the effective value (use placeholder if field is empty)
+			field := &m.fields[m.currentField]
+			effectiveValue := strings.TrimSpace(field.value)
+			if effectiveValue == "" {
+				effectiveValue = field.placeholder
+			}
+
+			// Validate if there's a validator
+			if field.validator != nil {
+				if err := field.validator(effectiveValue); err != nil {
+					// Validation failed, don't advance
+					return m, nil
+				}
+			}
+
+			// Check if required field is effectively empty
+			if field.required && effectiveValue == "" {
+				// Required field is empty, don't advance
+				return m, nil
+			}
+
+			// Advance to next field or finish
+			if m.currentField < len(m.fields)-1 {
+				m.currentField++
+			} else {
+				// Last field, we're done
+				m.finished = true
+				return m, tea.Quit
+			}
+		case "tab":
+			// Tab always advances (no validation)
+			if m.currentField < len(m.fields)-1 {
+				m.currentField++
+			} else {
+				// On last field with Tab, finish
+				m.finished = true
+				return m, tea.Quit
+			}
+		case "shift+tab":
+			if m.currentField > 0 {
+				m.currentField--
+			}
+		case "backspace":
+			if len(m.fields[m.currentField].value) > 0 {
+				m.fields[m.currentField].value = m.fields[m.currentField].value[:len(m.fields[m.currentField].value)-1]
+			}
+		default:
+			// Add character to current field
+			if len(msg.String()) == 1 {
+				m.fields[m.currentField].value += msg.String()
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m configModel) View() string {
+	var s strings.Builder
+
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("205")).
+		MarginBottom(1)
+
+	fieldStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		Padding(0, 1).
+		MarginBottom(1)
+
+	activeFieldStyle := fieldStyle.Copy().
+		BorderForeground(lipgloss.Color("205"))
+
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("240")).
+		MarginBottom(1)
+
+	s.WriteString(titleStyle.Render("Wonderland Configuration Setup"))
+	s.WriteString("\n")
+
+	for i, field := range m.fields {
+		var fieldStr string
+		if field.value == "" && i == m.currentField {
+			fieldStr = field.placeholder
+		} else if field.value == "" {
+			fieldStr = field.placeholder
+		} else {
+			fieldStr = field.value
+		}
+
+		// Show cursor on active field
+		if i == m.currentField {
+			fieldStr += "│"
+		}
+
+		label := field.label
+		if field.required {
+			label += " *"
+		}
+
+		var style lipgloss.Style
+		if i == m.currentField {
+			style = activeFieldStyle
+		} else {
+			style = fieldStyle
+		}
+
+		s.WriteString(label + "\n")
+		s.WriteString(style.Render(fieldStr))
+		s.WriteString("\n")
+
+		if i == m.currentField && field.help != "" {
+			s.WriteString(helpStyle.Render(field.help))
+			s.WriteString("\n")
+		}
+	}
+
+	s.WriteString("\nControls: Enter=Next, Tab=Next, Shift+Tab=Prev, Ctrl+C=Quit\n")
+	s.WriteString("Fields marked with * are required\n")
+
+	return s.String()
 }
 
 func main() {
@@ -74,7 +228,7 @@ func main() {
 
 	// Add command
 	var addCmd = &cobra.Command{
-		Use:   "add <name>",
+		Use:   "add <n>",
 		Short: "Add a new host to known hosts",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -119,7 +273,7 @@ func main() {
 
 	// Remove command
 	var removeCmd = &cobra.Command{
-		Use:   "remove <name>",
+		Use:   "remove <n>",
 		Short: "Remove a host from known hosts",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -128,6 +282,23 @@ func main() {
 				log.Fatalf("Failed to remove host: %v", err)
 			}
 			log.Printf("Host '%s' removed successfully", name)
+		},
+	}
+
+	// Config command group
+	var configCmd = &cobra.Command{
+		Use:   "config",
+		Short: "Manage configuration",
+	}
+
+	// Config new subcommand
+	var configNewCmd = &cobra.Command{
+		Use:   "new",
+		Short: "Create a new configuration file interactively",
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := createConfigInteractive(); err != nil {
+				log.Fatalf("Failed to create config: %v", err)
+			}
 		},
 	}
 
@@ -173,9 +344,10 @@ func main() {
 	inviteOpenCmd.Flags().StringP("name", "n", "", "Override server name")
 
 	inviteCmd.AddCommand(inviteNewCmd, inviteOpenCmd)
+	configCmd.AddCommand(configNewCmd)
 
 	// Add commands
-	rootCmd.AddCommand(serverCmd, connectCmd, addCmd, listCmd, removeCmd, inviteCmd)
+	rootCmd.AddCommand(serverCmd, connectCmd, addCmd, listCmd, removeCmd, inviteCmd, configCmd)
 
 	// Execute
 	if err := rootCmd.Execute(); err != nil {
@@ -200,6 +372,258 @@ func loadConfigIfNeeded() (*Config, error) {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 	return config, nil
+}
+
+func createConfigInteractive() error {
+	// Check if config already exists
+	configPath, err := getDefaultConfigPath()
+	if err != nil {
+		return fmt.Errorf("failed to determine config path: %w", err)
+	}
+
+	if _, err := os.Stat(configPath); err == nil {
+		return fmt.Errorf("config file already exists at %s", configPath)
+	}
+
+	// Get default values
+	homeDir, _ := os.UserHomeDir()
+	currentUser := os.Getenv("USER")
+	if currentUser == "" {
+		currentUser = os.Getenv("USERNAME")
+	}
+	if currentUser == "" {
+		currentUser = "user"
+	}
+
+	// Define configuration fields
+	fields := []configField{
+		{
+			label:       "Server Name",
+			placeholder: "my-server",
+			help:        "A friendly name for your server",
+			required:    true,
+		},
+		{
+			label:       "Wish Server Port",
+			placeholder: "2222",
+			help:        "Local port for the SSH server (default: 2222)",
+			required:    true,
+			validator: func(s string) error {
+				if port, err := strconv.Atoi(s); err != nil || port < 1 || port > 65535 {
+					return fmt.Errorf("invalid port number")
+				}
+				return nil
+			},
+		},
+		{
+			label:       "Host Key Path",
+			placeholder: filepath.Join(homeDir, ".local", "share", "wonderland", "host_key"),
+			help:        "Path to store the server host key",
+			required:    true,
+		},
+		{
+			label:       "Authorized Keys Path",
+			placeholder: filepath.Join(homeDir, ".local", "share", "wonderland", "authorized_keys"),
+			help:        "Path to authorized_keys file",
+			required:    true,
+		},
+		{
+			label:       "Admin Keys Path",
+			placeholder: filepath.Join(homeDir, ".local", "share", "wonderland", "admin_keys"),
+			help:        "Path to admin keys file",
+			required:    true,
+		},
+		{
+			label:       "Tunnel SSH Host",
+			placeholder: "example.com",
+			help:        "Remote server hostname/IP for SSH tunnel",
+			required:    true,
+		},
+		{
+			label:       "Tunnel SSH Port",
+			placeholder: "22",
+			help:        "Remote server SSH port (default: 22)",
+			required:    true,
+			validator: func(s string) error {
+				if port, err := strconv.Atoi(s); err != nil || port < 1 || port > 65535 {
+					return fmt.Errorf("invalid port number")
+				}
+				return nil
+			},
+		},
+		{
+			label:       "Tunnel User",
+			placeholder: currentUser,
+			help:        "SSH username for tunnel connection",
+			required:    true,
+		},
+		{
+			label:       "Tunnel Private Key Path",
+			placeholder: filepath.Join(homeDir, ".ssh", "id_ed25519"),
+			help:        "Path to SSH private key for tunnel",
+			required:    true,
+		},
+		{
+			label:       "Public Hostname",
+			placeholder: "example.com",
+			help:        "Public hostname for invites (usually same as tunnel host)",
+			required:    true,
+		},
+		{
+			label:       "Remote Port",
+			placeholder: "2223",
+			help:        "Public port for remote access",
+			required:    true,
+			validator: func(s string) error {
+				if port, err := strconv.Atoi(s); err != nil || port < 1 || port > 65535 {
+					return fmt.Errorf("invalid port number")
+				}
+				return nil
+			},
+		},
+		{
+			label:       "Local Port",
+			placeholder: "2222",
+			help:        "Local port for tunnel (usually same as Wish port)",
+			required:    true,
+			validator: func(s string) error {
+				if port, err := strconv.Atoi(s); err != nil || port < 1 || port > 65535 {
+					return fmt.Errorf("invalid port number")
+				}
+				return nil
+			},
+		},
+	}
+
+	model := configModel{
+		fields: fields,
+	}
+
+	p := tea.NewProgram(model)
+	finalModel, err := p.Run()
+	if err != nil {
+		return fmt.Errorf("TUI error: %w", err)
+	}
+
+	// Check if user cancelled
+	result := finalModel.(configModel)
+	if !result.finished {
+		return fmt.Errorf("configuration cancelled")
+	}
+
+	// Convert values, using defaults for empty non-required fields
+	serverName := result.fields[0].value
+	wishPortStr := result.fields[1].value
+	if wishPortStr == "" {
+		wishPortStr = "2222"
+	}
+	wishPort, _ := strconv.Atoi(wishPortStr)
+
+	hostKeyPath := result.fields[2].value
+	if hostKeyPath == "" {
+		hostKeyPath = filepath.Join(homeDir, ".local", "share", "wonderland", "host_key")
+	}
+
+	authorizedKeysPath := result.fields[3].value
+	if authorizedKeysPath == "" {
+		authorizedKeysPath = filepath.Join(homeDir, ".local", "share", "wonderland", "authorized_keys")
+	}
+
+	adminKeysPath := result.fields[4].value
+	if adminKeysPath == "" {
+		adminKeysPath = filepath.Join(homeDir, ".local", "share", "wonderland", "admin_keys")
+	}
+
+	tunnelHost := result.fields[5].value
+	tunnelPortStr := result.fields[6].value
+	if tunnelPortStr == "" {
+		tunnelPortStr = "22"
+	}
+	tunnelPort, _ := strconv.Atoi(tunnelPortStr)
+
+	tunnelUser := result.fields[7].value
+	if tunnelUser == "" {
+		tunnelUser = currentUser
+	}
+
+	keyFile := result.fields[8].value
+	if keyFile == "" {
+		keyFile = filepath.Join(homeDir, ".ssh", "id_ed25519")
+	}
+
+	publicHost := result.fields[9].value
+	if publicHost == "" {
+		publicHost = tunnelHost
+	}
+
+	remotePortStr := result.fields[10].value
+	if remotePortStr == "" {
+		remotePortStr = "2223"
+	}
+	remotePort, _ := strconv.Atoi(remotePortStr)
+
+	localPortStr := result.fields[11].value
+	if localPortStr == "" {
+		localPortStr = wishPortStr
+	}
+	localPort, _ := strconv.Atoi(localPortStr)
+
+	// Create config structure matching the existing Config type
+	config := Config{
+		Server: struct {
+			Name string `yaml:"name"`
+		}{
+			Name: serverName,
+		},
+		Wish: struct {
+			Port           int    `yaml:"port"`
+			HostKey        string `yaml:"host_key"`
+			AuthorizedKeys string `yaml:"authorized_keys"`
+			AdminKeys      string `yaml:"admin_keys"`
+		}{
+			Port:           wishPort,
+			HostKey:        hostKeyPath,
+			AuthorizedKeys: authorizedKeysPath,
+			AdminKeys:      adminKeysPath,
+		},
+		Tunnel: struct {
+			Host       string `yaml:"host"`
+			PublicHost string `yaml:"public_host"`
+			Port       int    `yaml:"port"`
+			User       string `yaml:"user"`
+			KeyFile    string `yaml:"key_file"`
+			RemotePort int    `yaml:"remote_port"`
+			LocalPort  int    `yaml:"local_port"`
+		}{
+			Host:       tunnelHost,
+			PublicHost: publicHost,
+			Port:       tunnelPort,
+			User:       tunnelUser,
+			KeyFile:    keyFile,
+			RemotePort: remotePort,
+			LocalPort:  localPort,
+		},
+	}
+
+	// Create config directory if it doesn't exist
+	configDir := filepath.Dir(configPath)
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	// Marshal to YAML
+	configYAML, err := yaml.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	// Write config file
+	if err := os.WriteFile(configPath, configYAML, 0600); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	log.Printf("Configuration created successfully at: %s", configPath)
+	return nil
 }
 
 func createInviteKeypair() error {
